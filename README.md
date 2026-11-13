@@ -80,11 +80,11 @@ The Windows pairing build reads the six-digit code from Apple's dialog and submi
    Remove-Item Env:WXT_WINDOWS_PAIRING_FORK
    ```
 
-3. Double-click **Open Chrome with Better Passwords.cmd**. It registers the companion for your Windows account and opens Chrome. Keep the launcher, `scripts`, and `apps/companion-windows` together so Chrome can find the companion.
+3. Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-pairing.ps1` once from the fork folder to register the companion. Keep `scripts` and `apps/companion-windows` together so Chrome can find the companion.
 4. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select `apps/extension/.output/chrome-mv3-windows-pairing`.
 5. **Better Passwords - Windows pairing** verifies automatically after you load it. If the companion cannot read the dialog, open the extension popup to enter the code manually. Automatic reading currently expects Apple's English dialog.
 
-Once the companion is registered, opening Chrome from your usual shortcut also works. Chrome starts the companion when needed, and the companion exits after returning the pairing result. To remove the fork, remove it from Chrome and run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-pairing.ps1 -Uninstall`. The fork has its own Chrome extension ID and native host registrations, so it can coexist with the store version.
+Open Chrome from your usual shortcut. Chrome starts the companion when needed, and the companion exits after returning the pairing result. To remove the fork, remove it from Chrome and run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-pairing.ps1 -Uninstall`. The fork has its own Chrome extension ID and native host registrations, so it can coexist with the store version.
 
 #### Manual pairing with the standard build
 
