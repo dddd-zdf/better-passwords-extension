@@ -7,8 +7,12 @@ export const REPO_URL = "https://github.com/fanckush/better-passwords-extension"
 /** Where problems can be reported without a GitHub account. */
 export const SUPPORT_EMAIL = "fanckush@gmail.com";
 export const SETUP_COMMAND = `curl -fsSL ${REPO_URL}/raw/main/scripts/setup-mac.sh | sh`;
-/** The same setup on Windows, for PowerShell. */
-export const WINDOWS_SETUP_COMMAND = `irm ${REPO_URL}/raw/main/scripts/setup-windows.ps1 | iex`;
+/** The unpacked Windows fork registers its own extension ID and both native hosts. */
+export const WINDOWS_PAIRING_FORK =
+  typeof import.meta.env !== "undefined" && import.meta.env.WXT_WINDOWS_PAIRING_FORK === "1";
+export const WINDOWS_SETUP_COMMAND = WINDOWS_PAIRING_FORK
+  ? "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\setup-windows-pairing.ps1"
+  : `irm ${REPO_URL}/raw/main/scripts/setup-windows.ps1 | iex`;
 /** Apple Passwords on Windows comes with this app (and its password helper). */
 export const ICLOUD_FOR_WINDOWS_URL = "https://apps.microsoft.com/detail/9PKTQ5699M62";
 
@@ -16,7 +20,9 @@ export const ICLOUD_FOR_WINDOWS_URL = "https://apps.microsoft.com/detail/9PKTQ56
  * Our own registration of Apple's helper, written by scripts/setup-mac.sh or the companion app on a
  * Mac, and by scripts/setup-windows.ps1 on Windows.
  */
-export const BRIDGE_HOST = "io.github.fanckush.betterpasswords.bridge";
+export const BRIDGE_HOST = WINDOWS_PAIRING_FORK
+  ? "io.github.fanckush.betterpasswords.windows_pairing_bridge"
+  : "io.github.fanckush.betterpasswords.bridge";
 
 /** The optional Touch ID companion app's own native host (see apps/companion). */
 export const COMPANION_HOST = "io.github.fanckush.betterpasswords.companion";

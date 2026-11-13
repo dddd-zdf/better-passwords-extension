@@ -66,6 +66,28 @@ The setup connects Chrome, Brave, Edge, Vivaldi, Arc, Dia, Helium, Crest, Ardia,
 
 ### On Windows
 
+#### Chrome with automatic pairing
+
+The Windows pairing build can read the six-digit code from Apple's dialog and submit it through Chrome's native messaging. Click **Enter it for me** in the extension popup. This build uses the click as confirmation and does not ask for Windows Hello. You can also enter the code manually.
+
+1. Install iCloud for Windows, sign in and turn on Passwords.
+2. Build this fork from its root with [Bun](https://bun.sh/).
+
+   ```powershell
+   bun install --frozen-lockfile --ignore-scripts
+   $env:WXT_WINDOWS_PAIRING_FORK = '1'
+   bun run --filter @app/extension build:chrome
+   Remove-Item Env:WXT_WINDOWS_PAIRING_FORK
+   ```
+
+3. Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-pairing.ps1`. Keep this checkout in place so Chrome can find the companion.
+4. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select `apps/extension/.output/chrome-mv3-windows-pairing`.
+5. Open **Better Passwords - Windows pairing** and click **Enter it for me** when prompted for the code. If the companion cannot read the dialog, use the code shown by Apple. Automatic reading currently expects Apple's English dialog.
+
+To remove the fork, remove it from Chrome and rerun the setup command with `-Uninstall`. The fork has its own Chrome extension ID and native host registrations, so it can coexist with the store version.
+
+#### Manual pairing with the standard build
+
 Install [iCloud for Windows](https://apps.microsoft.com/detail/9PKTQ5699M62) from the Microsoft Store, sign in and turn on Passwords. Then run this in PowerShell:
 
 ```powershell

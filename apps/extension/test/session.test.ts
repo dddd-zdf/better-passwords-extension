@@ -190,4 +190,28 @@ describe("Session", () => {
     expect(session.status.state).toBe("awaiting-code");
     expect(helper.currentCode).toBeDefined();
   });
+
+  it("rejects a host result after lock or a manual challenge refresh", async () => {
+    const { helper, session } = setup();
+    const old = await session.requestNewCode();
+    session.lock();
+    await session.requestCode();
+    await expect(session.verifyCode(helper.currentCode ?? "", old)).rejects.toMatchObject({ code: "superseded" });
+
+    const current = await session.requestNewCode();
+    const refreshed = await session.requestNewCode();
+    await expect(session.verifyCode(helper.currentCode ?? "", current)).rejects.toMatchObject({ code: "superseded" });
+    await session.verifyCode(helper.currentCode ?? "", refreshed);
+    expect(session.isUnlocked).toBe(true);
+  });
+
+  it("does not start a companion challenge if the session locked while the reader was arming", async () => {
+    const { session } = setup();
+    await session.connect();
+    const revision = session.pairingRevision;
+    session.lock();
+
+    await expect(session.requestNewCode(revision)).rejects.toMatchObject({ code: "superseded" });
+    expect(session.status.state).toBe("disconnected");
+  });
 });

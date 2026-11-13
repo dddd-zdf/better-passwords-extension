@@ -23,6 +23,7 @@ Apple Passwords / iCloud Keychain
 | `packages/fake-helper` | A test double of Apple's helper. Used in-process by unit tests and as a real native-messaging host by the e2e tests. |
 | `apps/extension` | The WXT extension: background worker, popup, the page-fill function, and the browser packages. |
 | `apps/companion` | The optional Touch ID companion app (Swift). See [companion.md](companion.md). |
+| `apps/companion-windows` | The Windows pairing fork's on-demand pairing-code reader. |
 | `scripts/setup-mac.sh` | One-time browser setup on macOS (see below). |
 | `scripts/setup-windows.ps1` | The same setup on Windows (see [Windows](#windows)). |
 
@@ -46,7 +47,9 @@ Until the bridge is registered, connecting fails with the browser's "host not fo
 
 iCloud for Windows (a Microsoft Store package) ships the same helper as `iCloudPasswordsExtensionHelper.exe`, and registers it as `com.apple.passwordmanager` for Apple's own extension IDs only. `scripts/setup-windows.ps1` writes our manifests to `%LOCALAPPDATA%\Better Passwords\` and registers them under `HKCU\Software\<browser>\NativeMessagingHosts`, pointing at the package's app execution alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\iCloudPasswordsExtensionHelper.exe`). The package's own folder is renamed with each iCloud update; the alias isn't. Firefox refuses to start a host whose path is a link, which the alias is, so Firefox's manifest points at a one-line `.bat` next to it that starts the alias through `cmd.exe` (as Chromium does for every host).
 
-Windows has no launch constraints, so no browser is blocked. A helper that quits as it starts means iCloud for Windows was removed or its alias turned off, and the setup flow says that instead. The companion app is Mac only: off a Mac, it's never asked or offered (`unavailable` in `src/companion.ts`). Apple's Windows helper never asks for Windows Hello before giving out a password or a code, so on Windows the session ends when the PC locks unless the user turns that off (`defaultSettings` in `src/messages.ts`), and the code screens don't say "Confirm with Touch ID". What's different in the helper's protocol is in [protocol.md](protocol.md#windows).
+Windows has no launch constraints, so no browser is blocked. A helper that quits as it starts means iCloud for Windows was removed or its alias turned off, and the setup flow says that instead. Apple's Windows helper never asks for Windows Hello before giving out a password or a code, so on Windows the session ends when the PC locks unless the user turns that off (`defaultSettings` in `src/messages.ts`). What's different in the helper's protocol is in [protocol.md](protocol.md#windows).
+
+The [Windows pairing fork](../README.md#chrome-with-automatic-pairing) uses a separate Chrome extension ID and registers two local hosts. The bridge still launches Apple's helper directly. When the user clicks **Enter it for me** in the toolbar popup, the background opens a short-lived port to the Windows reader, arms it, and asks Apple's helper for a fresh pairing challenge. The reader returns six digits from a matching Apple dialog for the same browser and extension. The background uses them in the existing SRP exchange. The request uses the popup click as confirmation. Manual entry is available when the reader is missing or the code cannot be read, including when several profiles in the same Chrome process run the fork and the reader cannot identify a single helper.
 
 ## Sessions
 

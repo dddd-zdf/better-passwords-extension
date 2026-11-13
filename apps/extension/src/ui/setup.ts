@@ -9,6 +9,7 @@ import {
   ICLOUD_FOR_WINDOWS_URL,
   REPO_URL,
   SETUP_COMMAND,
+  WINDOWS_PAIRING_FORK,
   WINDOWS_SETUP_COMMAND,
 } from "../config.ts";
 import { type Status, send } from "../messages.ts";
@@ -353,12 +354,19 @@ function windowsRoute(act: (route: Route) => void): Node[] {
     h("p", { class: "note" }, "You need ", storeLink("iCloud for Windows"), ", signed in with Passwords turned on."),
     copy,
     command,
-    h("p", { class: "note", textContent: "Then paste it into PowerShell and press Enter." }),
+    h("p", {
+      class: "note",
+      textContent: WINDOWS_PAIRING_FORK
+        ? "Run the command in PowerShell from the Windows pairing fork folder."
+        : "Then paste it into PowerShell and press Enter.",
+    }),
     h(
       "p",
       { class: "links" },
       h("a", {
-        href: `${REPO_URL}/blob/main/scripts/setup-windows.ps1`,
+        href: WINDOWS_PAIRING_FORK
+          ? "https://github.com/dddd-zdf/better-passwords-extension/blob/codex/windows-pairing-companion/scripts/setup-windows-pairing.ps1"
+          : `${REPO_URL}/blob/main/scripts/setup-windows.ps1`,
         target: "_blank",
         rel: "noopener",
         textContent: "Read the script",

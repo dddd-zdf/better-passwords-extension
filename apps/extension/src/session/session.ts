@@ -32,6 +32,11 @@ export interface SessionDeps {
   blockedEarlier?: () => Promise<string | undefined>;
 }
 
+/** Opaque identity of a live pairing challenge in this session. */
+export interface SessionChallenge {
+  readonly revision: number;
+}
+
 /** What a browser says when the helper quit: Chromium's words; Firefox may give none. */
 const EXITED = /native host has exited|^connection closed$/i;
 /** A helper that quit before answering gets one more try, in case it just crashed. */
@@ -49,6 +54,7 @@ export class Session {
   #status: SessionStatus = { state: "disconnected" };
   #listeners = new Set<(status: SessionStatus) => void>();
   #restored: Promise<void>;
+  #pairingRevision = 0;
 
   constructor(private readonly deps: SessionDeps) {
     this.#restored = Promise.resolve(deps.blockedEarlier?.())
@@ -65,6 +71,10 @@ export class Session {
 
   get isUnlocked(): boolean {
     return this.#client?.state === "unlocked";
+  }
+
+  get pairingRevision(): number {
+    return this.#pairingRevision;
   }
 
   onChange(listener: (status: SessionStatus) => void): () => void {
@@ -94,18 +104,24 @@ export class Session {
   async requestCode(): Promise<void> {
     const client = await this.connect();
     if (client.state === "unlocked" || client.hasLiveChallenge) return;
-    await this.#track(client.requestChallenge());
+    await this.#requestChallenge(client);
   }
 
   /** Forces a fresh code, replacing one the user may have lost. */
-  async requestNewCode(): Promise<void> {
+  async requestNewCode(expectedRevision?: number): Promise<SessionChallenge> {
+    this.#checkPairingRevision(expectedRevision);
     const client = await this.connect();
-    await this.#track(client.requestChallenge());
+    this.#checkPairingRevision(expectedRevision);
+    return this.#requestChallenge(client);
   }
 
-  async verifyCode(code: string): Promise<void> {
+  async verifyCode(code: string, expected?: SessionChallenge): Promise<void> {
     if (!/^\d{6}$/.test(code)) throw new ProtocolError("the code has 6 digits", "incorrect-code");
+    this.#checkPairingRevision(expected?.revision);
     const client = await this.connect();
+    this.#checkPairingRevision(expected?.revision);
+    // Every verification attempt consumes the current challenge, even if the helper rejects it.
+    this.#pairingRevision++;
     await this.#track(client.verifyCode(code));
   }
 
@@ -117,6 +133,7 @@ export class Session {
 
   /** Ends the session. Closing the port makes Apple's helper exit and forget the key. */
   lock(): void {
+    this.#pairingRevision++;
     this.#client?.close();
     this.#client = undefined;
     this.#set({ state: "disconnected" });
@@ -156,7 +173,10 @@ export class Session {
       );
       client.onStateChange((state) => {
         if (state === "closed") {
-          if (this.#client === client) this.#client = undefined;
+          if (this.#client === client) {
+            this.#client = undefined;
+            this.#pairingRevision++;
+          }
           this.#set(
             closeError && MISSING_HOST.test(closeError) ? { state: "no-helper", error: closeError } : { state },
           );
@@ -192,6 +212,18 @@ export class Session {
     } catch (error) {
       this.#set({ state: this.#client?.state ?? "disconnected", error: message(error) });
       throw error;
+    }
+  }
+
+  async #requestChallenge(client: ApplePasswordsClient): Promise<SessionChallenge> {
+    const revision = ++this.#pairingRevision;
+    await this.#track(client.requestChallenge());
+    return { revision };
+  }
+
+  #checkPairingRevision(expected: number | undefined): void {
+    if (expected !== undefined && expected !== this.#pairingRevision) {
+      throw new ProtocolError("that pairing request was superseded", "superseded");
     }
   }
 

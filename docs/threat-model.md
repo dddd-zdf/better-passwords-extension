@@ -62,3 +62,9 @@ The full design is in [companion.md](companion.md).
 | A tampered update, or an appcast pointing elsewhere | Sparkle installs only disk images signed with our EdDSA key, verifies them before unpacking, and requires the appcast to be signed by the same key. The update is offered, never installed without asking (unless the user turns that on). |
 | The update check leaks something | The agent fetches the appcast with no cookies or cache, at most once a day. The request carries the app's version and nothing else, and it can be turned off in the app. |
 | A program runs our native host itself, to reach the agent | That passes the XPC check, since it's our signed host. So the agent also requires the host's parent to be running Apple's signed helper, which macOS lets only browsers start, before it reads the code or the contact card. Otherwise any program could read the "Me" card's emails without Contacts permission. |
+
+## Windows pairing fork
+
+This optional build uses a click in the toolbar popup as consent to read the pairing dialog. Anyone with access to the unlocked Windows desktop and the browser popup can initiate pairing. Windows Hello is not required. Locking the PC still ends the Chrome pairing session by default.
+
+Chrome permits only the fork's extension ID to connect to the reader. The reader checks that the iCloud dialog belongs to a helper launched for that extension by the same Chrome process. It looks for a fresh, unambiguous code after the extension asks Apple for a challenge. The code is sent only to the background worker over native messaging, where the existing protocol verifies it against the same pairing challenge.

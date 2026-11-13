@@ -5,8 +5,13 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "wxt";
 import { DISPLAY_NAME, EXTENSION_PUBLIC_KEY, FILL_MATCHES, FIREFOX_EXTENSION_ID, STORE_TITLE } from "./src/config.ts";
 
+// Give the Windows fork its own Chrome ID so it can be loaded beside the store build.
+const windowsPairingFork = process.env.WXT_WINDOWS_PAIRING_FORK === "1";
+const windowsPairingPublicKey =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo81NFjus8TfSZi9/HOk8StyA4+/Es7+yymeewkRjraO67Bc8oTZVwTsH4c8rnuT4/48yM70B0vkseHVXWuQnp0Xyi2JcZyR/Nao64ZFzyRKPCE7YiTUf+3I45c38AR2Zzea/cQ8359nLsHxwqGuA09c4Od+ixTkE12JggEDhSqGJrvQNNKA/dUMdo+tYf3nH15y5q7+voXgNLveYJ/i0hkee9DGT0YmYCdb2tHqHW9AuEUFxc/ytBiR3YMacXKRS54Le94W4TK2GZmQXU1LoGSEVW347iC8g4/5OIaQWgXMfaEqFoCZoc3gTAChko8KPi3OOad0yJqpo/3Bsu1j7awIDAQAB";
+
 export default defineConfig({
-  outDirTemplate: "{{browser}}-mv{{manifestVersion}}{{modeSuffix}}",
+  outDirTemplate: `{{browser}}-mv{{manifestVersion}}{{modeSuffix}}${windowsPairingFork ? "-windows-pairing" : ""}`,
   hooks: {
     // The GitHub ZIP keeps the identity field so unpacked installs get the store's ID, which
     // native messaging allows. Chrome rejects that field in store uploads, so the store gets a
@@ -15,7 +20,7 @@ export default defineConfig({
       if (wxt.config.browser !== "chrome") return;
       const path = join(wxt.config.outDir, "manifest.json");
       const manifest = JSON.parse(await readFile(path, "utf8"));
-      const { key: _, ...storeManifest } = manifest;
+      const { key, ...storeManifest } = manifest;
       const storeZip = join(dirname(zipPath), "store", basename(zipPath));
       await mkdir(dirname(storeZip), { recursive: true });
       await rm(storeZip, { force: true });
@@ -23,7 +28,7 @@ export default defineConfig({
       try {
         execFileSync("zip", ["-qrX", storeZip, "."], { cwd: wxt.config.outDir });
       } finally {
-        await writeFile(path, JSON.stringify({ ...manifest, key: EXTENSION_PUBLIC_KEY }));
+        await writeFile(path, JSON.stringify({ ...manifest, key }));
       }
     },
   },
@@ -47,6 +52,7 @@ export default defineConfig({
       "commitlint.config.js",
       "vitest.config.ts",
       "apps/extension/**",
+      "apps/companion-windows/**",
       "packages/**",
       "scripts/**",
       "docs/**",
@@ -60,8 +66,9 @@ export default defineConfig({
     ],
   },
   manifest: ({ browser }) => {
+    const isWindowsPairingFork = windowsPairingFork && browser === "chrome";
     return {
-      name: STORE_TITLE,
+      name: isWindowsPairingFork ? "Better Passwords - Windows pairing" : STORE_TITLE,
       short_name: DISPLAY_NAME,
       description: "Fill passwords from Apple Passwords, pairing far less often.",
       permissions: [
@@ -99,7 +106,7 @@ export default defineConfig({
               },
             },
           }
-        : { key: EXTENSION_PUBLIC_KEY }),
+        : { key: isWindowsPairingFork ? windowsPairingPublicKey : EXTENSION_PUBLIC_KEY }),
     };
   },
 });

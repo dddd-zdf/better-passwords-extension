@@ -39,6 +39,7 @@ import { Session } from "@/src/session/session.ts";
 import { toolbarAction } from "@/src/toolbar.ts";
 import { PendingUpdate } from "@/src/updates.ts";
 import { fillableUrl, frameOriginToFill, isAppleSignInFrame, sameFillableOrigin } from "@/src/url-policy.ts";
+import { WindowsPairing } from "@/src/windows-pairing.ts";
 
 const KEEP_ALIVE = "keep-alive";
 
@@ -102,6 +103,7 @@ export default defineBackground(() => {
   });
   // the companion app is Mac only; elsewhere it's never asked, nor offered
   const companion = new Companion(undefined, undefined, async () => (await platform()) === "mac");
+  const windowsPairing = new WindowsPairing();
 
   // An open native port keeps the worker alive in Chrome 105+; the alarm is a fallback that
   // wakes it if the browser suspends it anyway. Nothing to do on wake: state lives in memory.
@@ -239,6 +241,7 @@ export default defineBackground(() => {
   async function fullStatus(): Promise<Status> {
     const base = status();
     if (base.state === "no-helper" || base.state === "blocked") return base;
+    const os = await platform();
     const state = await companion.state();
     const update = await companion.update();
     const connected = base.state === "locked" || base.state === "awaiting-code";
@@ -246,6 +249,9 @@ export default defineBackground(() => {
     return {
       ...base,
       companion: state,
+      ...(!import.meta.env.FIREFOX && connected && os === "windows" && (await windowsPairing.state()) === "ready"
+        ? { windowsPairing: true }
+        : {}),
       touchId: state === "ready" && (await getSettings()).touchId,
       ...(update ? { companionUpdate: update } : {}),
       ...(updates.version ? { extensionUpdate: updates.version } : {}),
@@ -258,7 +264,7 @@ export default defineBackground(() => {
    * menu iframe), every tab-scoped request is bound to that tab, whatever `tabId` they pass.
    */
   type Caller =
-    | { kind: "page"; tabId?: number }
+    | { kind: "page"; tabId?: number; url: string }
     | { kind: "content-script"; tabId: number; frameId: number; url: string };
 
   function tabOf(caller: Caller, requested?: number): number {
@@ -794,6 +800,31 @@ export default defineBackground(() => {
         }
         return status();
       }
+      case "unlock-with-windows-pairing": {
+        if (
+          caller.kind !== "page" ||
+          import.meta.env.FIREFOX ||
+          (await platform()) !== "windows" ||
+          caller.url !== browser.runtime.getURL("/popup.html")
+        ) {
+          throw new Error("not allowed");
+        }
+        if (session.isUnlocked) return status();
+        const pairingRevision = session.pairingRevision;
+        try {
+          await windowsPairing.unlock(
+            () => session.requestNewCode(pairingRevision),
+            (code, challenge) => session.verifyCode(code, challenge),
+          );
+        } catch (error) {
+          // A wrong/stale code consumes its challenge; keep manual entry usable with a fresh one.
+          if ((error as { code?: string })?.code === "incorrect-code") {
+            await session.requestNewCode().catch(() => {});
+          }
+          throw error;
+        }
+        return status();
+      }
       case "request-code":
         await (request.fresh ? session.requestNewCode() : session.requestCode());
         return status();
@@ -1115,7 +1146,10 @@ export default defineBackground(() => {
         } satisfies Envelope<never>);
         return false;
       }
-      caller = sender.tab?.id === undefined ? { kind: "page" } : { kind: "page", tabId: sender.tab.id };
+      caller =
+        sender.tab?.id === undefined
+          ? { kind: "page", url: sender.url }
+          : { kind: "page", tabId: sender.tab.id, url: sender.url };
     } else if (
       sender.tab?.id !== undefined &&
       sender.frameId !== undefined &&
