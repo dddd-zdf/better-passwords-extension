@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WINDOWS_PAIRING_HOST, WindowsPairing } from "../src/windows-pairing.ts";
 
 type Listener = (value?: unknown) => void;
@@ -8,6 +8,13 @@ function portFor(reply: (message: { type: string }) => unknown) {
   const messageListeners = new Set<Listener>();
   const disconnectListeners = new Set<Listener>();
   let disconnected = false;
+  const disconnect = () => {
+    disconnected = true;
+  };
+  const exitHost = () => {
+    disconnect();
+    for (const listener of disconnectListeners) listener();
+  };
   const port = {
     name: WINDOWS_PAIRING_HOST,
     onMessage: {
@@ -24,13 +31,12 @@ function portFor(reply: (message: { type: string }) => unknown) {
       if (value instanceof Error) throw value;
       for (const listener of messageListeners) listener(value);
     },
-    disconnect: () => {
-      disconnected = true;
-      for (const listener of disconnectListeners) listener();
-    },
+    disconnect,
   } as unknown as Browser.runtime.Port;
-  return { port, messages, wasDisconnected: () => disconnected };
+  return { port, messages, exitHost, wasDisconnected: () => disconnected };
 }
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("WindowsPairing", () => {
   it("runs arm/read-code on one port", async () => {
@@ -82,5 +88,36 @@ describe("WindowsPairing", () => {
     await expect(second).rejects.toMatchObject({ code: "stable-code" });
     expect(requests).toBe(0);
     expect(persistent.wasDisconnected()).toBe(true);
+  });
+
+  it("checks Chrome's disconnect reason when the host exits after its reply", async () => {
+    const lastError = vi.fn(() => ({ message: "Native host has exited." }));
+    vi.stubGlobal("browser", {
+      runtime: {
+        get lastError() {
+          return lastError();
+        },
+      },
+    });
+    const persistent = portFor(({ type }) => (type === "read-code" ? { ok: true, code: "000000" } : { ok: true }));
+    const pairing = new WindowsPairing(() => persistent.port);
+    await pairing.unlock(
+      async () => ({ revision: 1 }),
+      async () => persistent.exitHost(),
+    );
+    expect(lastError).toHaveBeenCalledOnce();
+  });
+
+  it("rejects with the browser's reason if the host exits between messages", async () => {
+    vi.stubGlobal("browser", { runtime: { lastError: { message: "Native host has exited." } } });
+    const persistent = portFor(() => ({ ok: true }));
+    const pairing = new WindowsPairing(() => persistent.port);
+    await expect(
+      pairing.unlock(async () => {
+        persistent.exitHost();
+        return { revision: 1 };
+      }, vi.fn()),
+    ).rejects.toMatchObject({ code: "closed", message: "Native host has exited." });
+    expect(persistent.messages).toEqual([{ type: "arm" }]);
   });
 });

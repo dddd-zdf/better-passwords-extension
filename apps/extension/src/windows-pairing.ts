@@ -46,28 +46,33 @@ export class WindowsPairing {
     requestChallenge: () => Challenge,
     verifyCode: (code: string, challenge: SessionChallenge) => Promise<void>,
   ): Promise<void> {
-    let port: Browser.runtime.Port | undefined;
+    let port: Browser.runtime.Port;
     try {
-      try {
-        port = this.connectNative(WINDOWS_PAIRING_HOST);
-      } catch (error) {
-        throw new WindowsPairingError(messageOf(error), "not-installed");
-      }
-      const arm = await this.#request(port, { type: "arm" });
+      port = this.connectNative(WINDOWS_PAIRING_HOST);
+    } catch (error) {
+      throw new WindowsPairingError(messageOf(error), "not-installed");
+    }
+
+    const connection = new AbortController();
+    port.onDisconnect.addListener(() => {
+      // Chrome exposes the reason only during this event, including when the companion exits
+      // normally after sending its final reply.
+      const reason = browser.runtime.lastError?.message ?? "The Windows pairing helper disconnected.";
+      connection.abort(new WindowsPairingError(reason, "closed"));
+    });
+
+    try {
+      const arm = await this.#request(port, connection.signal, { type: "arm" });
       if (!arm.ok) throw this.#failure(arm);
       const challenge = await requestChallenge();
-      const reply = await this.#request(port, { type: "read-code" });
+      const reply = await this.#request(port, connection.signal, { type: "read-code" });
       if (!reply.ok || typeof reply.code !== "string" || !/^\d{6}$/.test(reply.code)) {
         throw this.#failure(reply);
       }
       // The code is passed directly to the background session and is never returned to the popup.
       await verifyCode(reply.code, challenge);
     } finally {
-      try {
-        port?.disconnect();
-      } catch {
-        // Disconnecting an already-closed native host is harmless.
-      }
+      if (!connection.signal.aborted) port.disconnect();
     }
   }
 
@@ -78,26 +83,26 @@ export class WindowsPairing {
     );
   }
 
-  #request(port: Browser.runtime.Port, message: object): Promise<WindowsPairingReply> {
+  #request(port: Browser.runtime.Port, connection: AbortSignal, message: object): Promise<WindowsPairingReply> {
     return new Promise<WindowsPairingReply>((resolve, reject) => {
-      let settled = false;
+      if (connection.aborted) {
+        reject(connection.reason);
+        return;
+      }
       const timer = setTimeout(
         () => finish(() => reject(new WindowsPairingError("The Windows pairing helper didn't answer.", "timeout"))),
         REQUEST_MS,
       );
       const finish = (action: () => void) => {
-        if (settled) return;
-        settled = true;
         clearTimeout(timer);
         port.onMessage.removeListener(onMessage);
-        port.onDisconnect.removeListener(onDisconnect);
+        connection.removeEventListener("abort", onDisconnect);
         action();
       };
       const onMessage = (value: unknown) => finish(() => resolve((value ?? {}) as WindowsPairingReply));
-      const onDisconnect = () =>
-        finish(() => reject(new WindowsPairingError("The Windows pairing helper disconnected.", "closed")));
+      const onDisconnect = () => finish(() => reject(connection.reason));
       port.onMessage.addListener(onMessage);
-      port.onDisconnect.addListener(onDisconnect);
+      connection.addEventListener("abort", onDisconnect);
       try {
         port.postMessage(message);
       } catch (error) {
