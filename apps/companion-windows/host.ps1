@@ -22,8 +22,7 @@ $script:State = [pscustomobject]@{
     HelperPids = @()
     BaselineWindows = @{}
 }
-$script:UiReady = $false
-$script:UiError = $null
+$script:WindowReaderReady = $false
 
 function Send-Response {
     param([Parameter(Mandatory = $true)]$Value)
@@ -74,15 +73,113 @@ function Read-Request {
     return $request
 }
 
-function Ensure-UiAutomation {
-    if ($script:UiReady) { return $true }
-    if ($null -ne $script:UiError) { return $false }
+function Initialize-WindowReader {
+    if ($script:WindowReaderReady) { return $true }
     try {
         Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-        $script:UiReady = $true
+        if ($null -eq ('BetterPasswords.NativeWindowApi' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace BetterPasswords {
+    public sealed class NativeWindowInfo {
+        public IntPtr Handle { get; private set; }
+        public uint ProcessId { get; private set; }
+        public string Key { get { return ProcessId + ":" + Handle.ToInt64(); } }
+
+        public NativeWindowInfo(IntPtr handle, uint processId) {
+            Handle = handle;
+            ProcessId = processId;
+        }
+    }
+
+    public static class NativeWindowApi {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetParent(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+
+        private static readonly Regex Prompt = new Regex(
+            @"\bEnter\s+this\s+verification\s+code\b.*?\bChrome\s+extension\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex Code = new Regex(@"\A[0-9]{3}\p{Zs}[0-9]{3}\z");
+
+        public static NativeWindowInfo[] GetDialogWindows(uint[] processIds) {
+            var allowed = new HashSet<uint>(processIds);
+            var windows = new List<NativeWindowInfo>();
+            var className = new StringBuilder(64);
+            EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+                uint processId;
+                GetWindowThreadProcessId(hWnd, out processId);
+                if (allowed.Contains(processId) && GetClassName(hWnd, className, className.Capacity) > 0 &&
+                    className.ToString() == "#32770") {
+                    windows.Add(new NativeWindowInfo(hWnd, processId));
+                }
+                return true;
+            }, IntPtr.Zero);
+            return windows.ToArray();
+        }
+
+        public static string ReadPairingCode(NativeWindowInfo dialog) {
+            uint owner;
+            if (GetWindowThreadProcessId(dialog.Handle, out owner) == 0 || owner != dialog.ProcessId) return null;
+
+            bool hasPrompt = false, hasDismiss = false;
+            int codes = 0;
+            string pin = null;
+            var className = new StringBuilder(64);
+            var text = new StringBuilder(512);
+
+            EnumChildWindows(dialog.Handle, delegate(IntPtr hWnd, IntPtr lParam) {
+                uint processId;
+                if (GetParent(hWnd) != dialog.Handle ||
+                    GetWindowThreadProcessId(hWnd, out processId) == 0 || processId != dialog.ProcessId ||
+                    GetClassName(hWnd, className, className.Capacity) == 0) return true;
+
+                string kind = className.ToString();
+                if (kind != "Static" && kind != "Button") return true;
+                // These controls have native captions, available before the dialog finishes opening.
+                if (GetWindowText(hWnd, text, text.Capacity) <= 0) return true;
+                string caption = text.ToString();
+                if (kind == "Button") {
+                    if (caption == "Dismiss") hasDismiss = true;
+                } else if (Prompt.IsMatch(caption)) {
+                    hasPrompt = true;
+                } else if (Code.IsMatch(caption)) {
+                    codes++;
+                    pin = caption.Remove(3, 1);
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            return hasPrompt && hasDismiss && codes == 1 ? pin : null;
+        }
+    }
+}
+'@
+        }
+        $script:WindowReaderReady = $true
         return $true
     } catch {
-        $script:UiError = $_.Exception.Message
         return $false
     }
 }
@@ -141,33 +238,42 @@ function Get-HelperProcesses {
     return $helpers
 }
 
+function Get-NativeDialogWindows {
+    param([Parameter(Mandatory = $true)][uint32[]]$HelperPids)
+    return [BetterPasswords.NativeWindowApi]::GetDialogWindows($HelperPids)
+}
 function Get-DialogCandidates {
-    param([Parameter(Mandatory = $true)][uint32[]]$HelperPids, [hashtable]$ExcludeWindows = @{}, [switch]$Baseline)
-    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-    $any = [System.Windows.Automation.Condition]::TrueCondition
-    $dialogClass = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, '#32770')
+    param(
+        [Parameter(Mandatory = $true)][object[]]$DialogWindows,
+        [hashtable]$ExcludeWindows = @{},
+        [switch]$AllowAccessibilityFallback
+    )
     $textType = [System.Windows.Automation.ControlType]::Text
     $buttonType = [System.Windows.Automation.ControlType]::Button
     $paneType = [System.Windows.Automation.ControlType]::Pane
     $codeShape = '\A[0-9]{3}\p{Zs}[0-9]{3}\z'
     $candidates = @()
     try {
-        foreach ($dialog in $desktop.FindAll('Children', $dialogClass)) {
+        foreach ($nativeWindow in @($DialogWindows)) {
             try {
-                $window = $dialog.Current
-                $windowPid = [uint32]$window.ProcessId
-                $windowHandle = [uint32]$window.NativeWindowHandle
-                $windowKey = "${windowPid}:$windowHandle"
-                if ($window.IsOffscreen -or $windowHandle -eq 0 -or $windowPid -notin $HelperPids -or $ExcludeWindows.ContainsKey($windowKey)) { continue }
-                if ($Baseline) {
-                    $candidates += $windowKey
+                $windowPid = [uint32]$nativeWindow.ProcessId
+                $windowHandle = [IntPtr]$nativeWindow.Handle
+                if ($ExcludeWindows.ContainsKey($nativeWindow.Key)) { continue }
+                $nativeCode = [BetterPasswords.NativeWindowApi]::ReadPairingCode($nativeWindow)
+                if ($null -ne $nativeCode) {
+                    $candidates += [pscustomobject]@{ Code = $nativeCode; ProcessId = $windowPid }
                     continue
                 }
+                if (-not $AllowAccessibilityFallback) { continue }
+                $dialog = [System.Windows.Automation.AutomationElement]::FromHandle($windowHandle)
+                if ($null -eq $dialog) { continue }
+                $window = $dialog.Current
+                if ($window.IsOffscreen -or [uint32]$window.ProcessId -ne $windowPid -or [uint64]$window.NativeWindowHandle -ne [uint64]$windowHandle.ToInt64()) { continue }
                 $hasPrompt = $false
                 $hasDismiss = $false
                 $codeControls = 0
                 $pin = $null
-                foreach ($child in $dialog.FindAll('Children', $any)) {
+                foreach ($child in $dialog.FindAll('Children', [System.Windows.Automation.Condition]::TrueCondition)) {
                     $info = $child.Current
                     if ($info.IsOffscreen -or [uint32]$info.ProcessId -ne $windowPid) { continue }
                     if (($info.ControlType -eq $textType -or $info.ControlType -eq $paneType) -and [string]$info.Name -match '(?i)\bEnter\s+this\s+verification\s+code\b.*?\bChrome\s+extension\b') { $hasPrompt = $true }
@@ -178,7 +284,7 @@ function Get-DialogCandidates {
                     }
                 }
                 if ($hasPrompt -and $hasDismiss -and $codeControls -eq 1 -and $pin -match '\A[0-9]{6}\z') {
-                    $candidates += [pscustomobject]@{ Code = $pin }
+                    $candidates += [pscustomobject]@{ Code = $pin; ProcessId = $windowPid }
                 }
             } catch { continue }
         }
@@ -197,15 +303,15 @@ function Invoke-Arm {
     $browser = Get-ChromeForHost
     if ($null -eq $browser) { return [pscustomobject]@{ ok = $false; error = 'browser-not-chrome'; message = 'Open Better Passwords from Google Chrome to pair.' } }
     if ([string]::IsNullOrWhiteSpace($browser.Origin)) { return [pscustomobject]@{ ok = $false; error = 'browser-origin-missing'; message = 'Chrome did not identify the Better Passwords extension.' } }
-    if (-not (Ensure-UiAutomation)) { return [pscustomobject]@{ ok = $false; error = 'ui-unavailable'; message = 'Windows accessibility is unavailable for the iCloud dialog.' } }
+    if (-not (Initialize-WindowReader)) { return [pscustomobject]@{ ok = $false; error = 'ui-unavailable'; message = 'The Windows reader could not initialize. Enter the code manually.' } }
     $helpers = @(Get-HelperProcesses -Snapshot $browser.Snapshot -ChromePid $browser.Pid -Origin $browser.Origin)
     if ($helpers.Count -eq 0) {
         return [pscustomobject]@{ ok = $false; error = 'helper-not-found'; message = 'Could not find the iCloud helper for this extension. Enter the code manually.' }
     }
     $helperPids = @($helpers | ForEach-Object { [uint32]$_.ProcessId })
     $baseline = @{}
-    foreach ($windowKey in @(Get-DialogCandidates -HelperPids $helperPids -Baseline)) {
-        $baseline[$windowKey] = $true
+    foreach ($nativeWindow in @(Get-NativeDialogWindows -HelperPids $helperPids)) {
+        $baseline[$nativeWindow.Key] = $true
     }
     $script:State.Armed = $true
     $script:State.ChromePid = $browser.Pid
@@ -218,22 +324,34 @@ function Invoke-ReadCode {
     if (-not $script:State.Armed -or $script:State.Used) { return [pscustomobject]@{ ok = $false; error = 'not-armed'; message = 'Pairing must be armed before reading its verification code.' } }
     $script:State.Armed = $false
     $script:State.Used = $true
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($script:ReadTimeoutMilliseconds)
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        while ([DateTime]::UtcNow -lt $deadline) {
-            $browser = Get-ChromeForHost
-            if ($null -eq $browser -or $browser.Pid -ne $script:State.ChromePid -or $browser.Origin -cne $script:State.BrowserOrigin) {
-                return [pscustomobject]@{ ok = $false; error = 'browser-not-chrome'; message = 'The original Chrome browser is no longer connected.' }
+        while ($clock.ElapsedMilliseconds -lt $script:ReadTimeoutMilliseconds) {
+            # Enumerating HWNDs is cheap and does not require a process snapshot on every poll.
+            $nativeWindows = @(Get-NativeDialogWindows -HelperPids $script:State.HelperPids)
+            if ($nativeWindows.Count -eq 0) {
+                Start-Sleep -Milliseconds 15
+                continue
             }
-            $helpers = @(Get-HelperProcesses -Snapshot $browser.Snapshot -ChromePid $browser.Pid -Origin $browser.Origin)
-            $helperPids = @($helpers | ForEach-Object { [uint32]$_.ProcessId } | Where-Object { $_ -in $script:State.HelperPids })
-            if ($helperPids.Count -eq 0) {
-                return [pscustomobject]@{ ok = $false; error = 'helper-changed'; message = 'The iCloud helper changed during pairing. Enter the code manually.' }
+            $candidates = @(Get-DialogCandidates -DialogWindows $nativeWindows -ExcludeWindows $script:State.BaselineWindows `
+                -AllowAccessibilityFallback:($clock.ElapsedMilliseconds -ge 200))
+            if ($candidates.Count -eq 1) {
+                # Revalidate the browser/helper chain only at the delivery boundary. The
+                # candidate PID must still be one of the originally authorized helpers.
+                $candidate = $candidates[0]
+                $browser = Get-ChromeForHost
+                if ($null -eq $browser -or $browser.Pid -ne $script:State.ChromePid -or $browser.Origin -cne $script:State.BrowserOrigin) {
+                    return [pscustomobject]@{ ok = $false; error = 'browser-not-chrome'; message = 'The original Chrome browser is no longer connected.' }
+                }
+                $helpers = @(Get-HelperProcesses -Snapshot $browser.Snapshot -ChromePid $browser.Pid -Origin $browser.Origin)
+                $verifiedHelperPids = @($helpers | ForEach-Object { [uint32]$_.ProcessId } | Where-Object { $_ -in $script:State.HelperPids })
+                if ($verifiedHelperPids.Count -eq 0 -or [uint32]$candidate.ProcessId -notin $verifiedHelperPids) {
+                    return [pscustomobject]@{ ok = $false; error = 'helper-changed'; message = 'The iCloud helper changed during pairing. Enter the code manually.' }
+                }
+                return [pscustomobject]@{ ok = $true; code = [string]$candidate.Code }
             }
-            $candidates = @(Get-DialogCandidates -HelperPids $helperPids -ExcludeWindows $script:State.BaselineWindows)
-            if ($candidates.Count -eq 1) { return [pscustomobject]@{ ok = $true; code = [string]$candidates[0].Code } }
             if ($candidates.Count -gt 1) { return [pscustomobject]@{ ok = $false; error = 'ambiguous-code'; message = 'More than one new iCloud verification dialog is open.' } }
-            Start-Sleep -Milliseconds 50
+            Start-Sleep -Milliseconds 15
         }
         return [pscustomobject]@{ ok = $false; error = 'no-code'; message = 'No new iCloud verification code appeared in Chrome.' }
     } finally {
