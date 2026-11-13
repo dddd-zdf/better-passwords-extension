@@ -1,7 +1,7 @@
 import type { ScriptPublicPath } from "wxt/utils/inject-script";
 import type { FieldKind } from "@/src/autofill/fields.ts";
 import { Companion } from "@/src/companion.ts";
-import { BRIDGE_HOST } from "@/src/config.ts";
+import { BRIDGE_HOST, WINDOWS_PAIRING_FORK } from "@/src/config.ts";
 import { fillCredentials } from "@/src/fill.ts";
 import { hasHideMyEmailConsent } from "@/src/icloud/consent.ts";
 import { HEADER_RULE_ID, HideMyEmail, headerRule, ICloudError } from "@/src/icloud/hide-my-email.ts";
@@ -39,7 +39,7 @@ import { Session } from "@/src/session/session.ts";
 import { toolbarAction } from "@/src/toolbar.ts";
 import { PendingUpdate } from "@/src/updates.ts";
 import { fillableUrl, frameOriginToFill, isAppleSignInFrame, sameFillableOrigin } from "@/src/url-policy.ts";
-import { WindowsPairing } from "@/src/windows-pairing.ts";
+import { WindowsPairing, WindowsPairingError } from "@/src/windows-pairing.ts";
 
 const KEEP_ALIVE = "keep-alive";
 
@@ -104,6 +104,46 @@ export default defineBackground(() => {
   // the companion app is Mac only; elsewhere it's never asked, nor offered
   const companion = new Companion(undefined, undefined, async () => (await platform()) === "mac");
   const windowsPairing = new WindowsPairing();
+  const autoPairOnWindows = platform().then(
+    (os) => WINDOWS_PAIRING_FORK && !import.meta.env.FIREFOX && os === "windows",
+  );
+  const manualLockKey = "windowsPairingManuallyLocked";
+  let manuallyLocked = false;
+  const restoreManualLock = autoPairOnWindows.then(async (enabled) => {
+    if (enabled) manuallyLocked = (await browser.storage.session.get(manualLockKey))[manualLockKey] === true;
+  });
+  // Share the attempt with requests arriving while pairing. Keep its result for this connection
+  // so a missing companion or an unreadable dialog can't trigger repeated automatic challenges.
+  const automaticAttempts = new WeakMap<object, Promise<void>>();
+  let automaticPairingError: string | undefined;
+
+  async function connectForUse(options?: { retry?: boolean }) {
+    const client = await session.connect(options);
+    if (!(await autoPairOnWindows)) return;
+    await restoreManualLock;
+    if (manuallyLocked || client.state === "unlocked" || client.state === "closed") return;
+    const revision = session.pairingRevision;
+    if ((await browser.idle.queryState(60)) === "locked" || manuallyLocked) return;
+    const existing = automaticAttempts.get(client);
+    if (existing) return existing;
+    if (session.isUnlocked || session.pairingRevision !== revision || client.hasLiveChallenge) return;
+    automaticPairingError = undefined;
+    const attempt = windowsPairing
+      .unlock(
+        () => session.requestNewCode(revision),
+        (code, challenge) => session.verifyCode(code, challenge),
+      )
+      .catch((error: unknown) => {
+        if (!manuallyLocked && !session.isUnlocked && (error as { code?: string })?.code !== "superseded") {
+          automaticPairingError =
+            error instanceof WindowsPairingError
+              ? error.message
+              : "Automatic pairing couldn't read the code. Enter it manually.";
+        }
+      });
+    automaticAttempts.set(client, attempt);
+    await attempt;
+  }
 
   // An open native port keeps the worker alive in Chrome 105+; the alarm is a fallback that
   // wakes it if the browser suspends it anyway. Nothing to do on wake: state lives in memory.
@@ -182,9 +222,15 @@ export default defineBackground(() => {
   // the toolbar button first; so does one whose helper won't start, which explains it. A computer
   // that is set up already (a reinstall) sees nothing.
   browser.runtime.onInstalled.addListener(async ({ reason }) => {
-    if (reason !== "install" || !(await supported)) return;
-    await session.connect().catch(() => {});
-    if (session.status.state === "no-helper" || session.status.state === "blocked") await openSetupPage();
+    if (reason !== "install" && !(await autoPairOnWindows)) return;
+    if (!(await supported)) return;
+    await connectForUse().catch(() => {});
+    if (reason === "install" && (session.status.state === "no-helper" || session.status.state === "blocked")) {
+      await openSetupPage();
+    }
+  });
+  browser.runtime.onStartup.addListener(async () => {
+    if (await autoPairOnWindows) await connectForUse().catch(() => {});
   });
 
   function openSetupPage() {
@@ -203,7 +249,10 @@ export default defineBackground(() => {
   browser.idle.setDetectionInterval(60 * 60);
 
   browser.idle.onStateChanged.addListener(async (state) => {
-    if (state === "active") return;
+    if (state === "active") {
+      if (await autoPairOnWindows) await connectForUse().catch(() => {});
+      return;
+    }
     if (updates.overdue) session.lock();
     else if (state === "locked" && (await getSettings()).lockOnScreenLock) session.lock();
   });
@@ -235,13 +284,17 @@ export default defineBackground(() => {
     });
   }
 
-  const status = (): Status => ({ ...session.status });
+  const status = (): Status => ({
+    ...session.status,
+    ...((session.status.state === "locked" || session.status.state === "awaiting-code") && automaticPairingError
+      ? { error: automaticPairingError }
+      : {}),
+  });
 
   /** Status plus whether the companion app can unlock with Touch ID. */
   async function fullStatus(): Promise<Status> {
     const base = status();
     if (base.state === "no-helper" || base.state === "blocked") return base;
-    const os = await platform();
     const state = await companion.state();
     const update = await companion.update();
     const connected = base.state === "locked" || base.state === "awaiting-code";
@@ -249,9 +302,6 @@ export default defineBackground(() => {
     return {
       ...base,
       companion: state,
-      ...(!import.meta.env.FIREFOX && connected && os === "windows" && (await windowsPairing.state()) === "ready"
-        ? { windowsPairing: true }
-        : {}),
       touchId: state === "ready" && (await getSettings()).touchId,
       ...(update ? { companionUpdate: update } : {}),
       ...(updates.version ? { extensionUpdate: updates.version } : {}),
@@ -347,7 +397,7 @@ export default defineBackground(() => {
     }
     // "no-helper" too: the user may have just run the setup. Never "blocked": see HELPER_BLOCKED
     if (["disconnected", "closed", "no-helper"].includes(session.status.state)) {
-      await session.connect().catch(() => {});
+      await connectForUse().catch(() => {});
     }
     if (!session.isUnlocked) {
       // an unlock button that can't work helps nobody; the toolbar badge and popup explain it
@@ -654,7 +704,9 @@ export default defineBackground(() => {
 
   /** Whether Apple Passwords is unlocked, reconnecting first if the connection was lost. */
   async function connectedUnlocked(): Promise<boolean> {
-    if (["disconnected", "closed"].includes(session.status.state)) await session.connect().catch(() => {});
+    if (session.status.state !== "blocked" && session.status.state !== "no-helper") {
+      await connectForUse().catch(() => {});
+    }
     return session.isUnlocked;
   }
 
@@ -713,7 +765,7 @@ export default defineBackground(() => {
     // the app answers only a browser running Apple's helper (anything else could be a program
     // reading Contacts through it), so make sure ours is: connecting starts it, without pairing
     if (session.status.state === "disconnected" || session.status.state === "closed") {
-      await session.connect().catch(() => {});
+      await connectForUse().catch(() => {});
     }
     try {
       return { state: "ready", emails: await companion.myEmails() };
@@ -780,10 +832,22 @@ export default defineBackground(() => {
     }
     switch (request.type) {
       case "get-status":
+        if (caller.url === browser.runtime.getURL("/popup.html") && (await autoPairOnWindows)) {
+          await restoreManualLock;
+          if (manuallyLocked) {
+            manuallyLocked = false;
+            await browser.storage.session.remove(manualLockKey);
+            session.lock();
+          }
+        }
         // retrying "no-helper" is how the popup and setup page notice that setup just finished;
         // "blocked" waits for the user to ask (retry-connection)
-        if (session.status.state === "disconnected" || session.status.state === "no-helper") {
-          await session.connect().catch(() => {});
+        if (
+          session.status.state === "disconnected" ||
+          session.status.state === "no-helper" ||
+          (await autoPairOnWindows)
+        ) {
+          await connectForUse().catch(() => {});
         }
         return fullStatus();
       case "unlock-with-touch-id": {
@@ -800,31 +864,6 @@ export default defineBackground(() => {
         }
         return status();
       }
-      case "unlock-with-windows-pairing": {
-        if (
-          caller.kind !== "page" ||
-          import.meta.env.FIREFOX ||
-          (await platform()) !== "windows" ||
-          caller.url !== browser.runtime.getURL("/popup.html")
-        ) {
-          throw new Error("not allowed");
-        }
-        if (session.isUnlocked) return status();
-        const pairingRevision = session.pairingRevision;
-        try {
-          await windowsPairing.unlock(
-            () => session.requestNewCode(pairingRevision),
-            (code, challenge) => session.verifyCode(code, challenge),
-          );
-        } catch (error) {
-          // A wrong/stale code consumes its challenge; keep manual entry usable with a fresh one.
-          if ((error as { code?: string })?.code === "incorrect-code") {
-            await session.requestNewCode().catch(() => {});
-          }
-          throw error;
-        }
-        return status();
-      }
       case "request-code":
         await (request.fresh ? session.requestNewCode() : session.requestCode());
         return status();
@@ -832,6 +871,13 @@ export default defineBackground(() => {
         await session.verifyCode(request.code);
         return status();
       case "lock":
+        if (await autoPairOnWindows) {
+          await restoreManualLock;
+          manuallyLocked = true;
+          session.lock();
+          await browser.storage.session.set({ [manualLockKey]: true });
+          return status();
+        }
         session.lock();
         return status();
       case "install-update":
@@ -1030,7 +1076,7 @@ export default defineBackground(() => {
         await companion.openApp();
         return null;
       case "retry-connection":
-        await session.connect({ retry: true }).catch(() => {});
+        await connectForUse({ retry: true }).catch(() => {});
         return fullStatus();
       case "open-companion-page":
         // our own page about the app, which links to its download

@@ -65,6 +65,6 @@ The full design is in [companion.md](companion.md).
 
 ## Windows pairing fork
 
-This optional build uses a click in the toolbar popup as consent to read the pairing dialog. Anyone with access to the unlocked Windows desktop and the browser popup can initiate pairing. Windows Hello is not required. Locking the PC still ends the Chrome pairing session by default.
+This optional build pairs automatically in the active Windows session without a Windows Hello prompt. Anyone with access to that desktop can use the browser's unlocked password session. Locking the PC still ends the Chrome pairing session by default. The extension checks the desktop lock state before it attempts automatic pairing.
 
 Chrome permits only the fork's extension ID to connect to the reader. The reader checks that the iCloud dialog belongs to a helper launched for that extension by the same Chrome process. It looks for a fresh, unambiguous code after the extension asks Apple for a challenge. The code is sent only to the background worker over native messaging, where the existing protocol verifies it against the same pairing challenge.

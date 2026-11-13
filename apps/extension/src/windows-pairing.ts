@@ -20,55 +20,18 @@ export class WindowsPairingError extends Error {
   }
 }
 
-type SendNative = (host: string, message: object) => Promise<unknown>;
 type ConnectNative = (host: string) => Browser.runtime.Port;
 type Challenge = Promise<SessionChallenge>;
 
-const HELLO_MS = 3_500;
 const REQUEST_MS = 8_000;
 
-function within<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new WindowsPairingError(message, "timeout")), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
-/**
- * Coordinates the Windows pairing reader. The one-shot hello is only a readiness probe. Unlocking
- * uses a separate persistent native port so arm, challenge and read-code belong to one host run.
- */
+/** Uses one native port so arm, challenge and read-code belong to the same host run. */
 export class WindowsPairing {
   #attempt: Promise<void> | undefined;
 
-  constructor(
-    private readonly sendNative: SendNative = (host, message) => browser.runtime.sendNativeMessage(host, message),
-    private readonly connectNative: ConnectNative = (host) => browser.runtime.connectNative(host),
-  ) {}
+  constructor(private readonly connectNative: ConnectNative = (host) => browser.runtime.connectNative(host)) {}
 
-  async state(): Promise<"ready" | "unavailable"> {
-    try {
-      const reply = (await within(
-        this.sendNative(WINDOWS_PAIRING_HOST, { type: "hello" }),
-        HELLO_MS,
-        "The Windows pairing helper didn't answer.",
-      )) as WindowsPairingReply | undefined;
-      return reply?.ok === true ? "ready" : "unavailable";
-    } catch {
-      return "unavailable";
-    }
-  }
-
-  /** Runs at most one host attempt at a time; duplicate popup clicks share its result. */
+  /** Concurrent requests share one host attempt. */
   unlock(
     requestChallenge: () => Challenge,
     verifyCode: (code: string, challenge: SessionChallenge) => Promise<void>,

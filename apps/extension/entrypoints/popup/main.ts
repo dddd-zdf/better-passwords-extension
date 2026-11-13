@@ -16,7 +16,6 @@ applySystemAccent();
 const app = document.getElementById("app") as HTMLElement;
 /** "Mac" or "PC": the computer showing Apple's code (set before the first screen). */
 let computer = "Mac";
-let isWindows = false;
 /** What's shown while a verification code is fetched: macOS asks for Touch ID, Windows nothing. */
 let fetchingCode = "Confirm with Touch ID…";
 
@@ -46,33 +45,16 @@ async function refresh(error?: string) {
   if (status.state === "no-helper" || status.state === "blocked" || status.justConnected) return showSetup(status);
 
   if (status.state === "unlocked") return showLogins(status, error);
-  // locked or disconnected: start unlocking right away, saving the user a click
   const awaitingCode = status.state === "awaiting-code";
-  // Mac Touch ID keeps its historical automatic popup flow. Windows pairing is always explicit:
-  // opening a page or the popup must never ask the native reader to unlock on its own.
-  if (status.touchId && !isWindows && !error && !awaitingCode) return unlockWithTouchId(status);
-  if (isWindows && status.windowsPairing && !error && !awaitingCode) return showWindowsChoice(status);
+  if (status.touchId && !error && !awaitingCode) return unlockWithTouchId(status);
   return requestManualCode(status, error);
-}
-
-function showWindowsChoice(status: Status) {
-  const automatic = h("button", { class: "primary", textContent: "Enter it for me" });
-  automatic.addEventListener("click", () => void unlockWithWindowsPairing(status));
-  const manual = h("button", { class: "link", textContent: "Enter code manually" });
-  manual.addEventListener("click", () => void requestManualCode(status));
-  show(
-    h("h1", { textContent: "Unlock Better Passwords" }),
-    h("div", { class: "actions" }, automatic),
-    manual,
-    reportProblem(),
-  );
 }
 
 async function requestManualCode(status: Status, error?: string) {
   // a fresh code even if one is still valid: the user may have closed Apple's window since, and
   // nothing tells us
   codeRequest = popupSettled().then(() => send({ type: "request-code", fresh: true }));
-  const input = showCodeEntry(status, error ?? (status.state === "awaiting-code" ? status.error : undefined));
+  const input = showCodeEntry(status, error ?? status.error);
   try {
     await codeRequest;
   } catch (e) {
@@ -114,20 +96,6 @@ async function unlockWithTouchId(status: Status) {
   } catch (e) {
     // the code is on screen either way, so typing it still works
     showCodeEntry(status, messageOf(e));
-  }
-}
-
-async function unlockWithWindowsPairing(status: Status) {
-  show(h("h1", { textContent: "Getting the code" }), h("p", {}, "The Windows pairing helper is entering it for you."));
-  try {
-    await send({ type: "unlock-with-windows-pairing" });
-    await refresh();
-  } catch (e) {
-    const code = (e as { code?: string })?.code;
-    // The background requests a fresh challenge after verification failures. Reader/transport
-    // failures may happen before a challenge exists, so start the manual path in that case.
-    if (code === "incorrect-code" || code === "superseded") showCodeEntry(status, messageOf(e));
-    else await requestManualCode(status, messageOf(e));
   }
 }
 
@@ -182,12 +150,9 @@ function showCodeEntry(status: Status, error?: string): HTMLInputElement {
   });
 
   let touchId: HTMLButtonElement | null = null;
-  if (status.touchId || status.windowsPairing) {
+  if (status.touchId) {
     touchId = h("button", { class: "link", textContent: "Enter it for me" });
-    touchId.addEventListener(
-      "click",
-      () => void (status.windowsPairing ? unlockWithWindowsPairing(status) : unlockWithTouchId(status)),
-    );
+    touchId.addEventListener("click", () => void unlockWithTouchId(status));
   }
   const companionHint =
     status.companion === "needs-setup"
@@ -606,7 +571,6 @@ function messageOf(error: unknown): string {
 void platform()
   .then((os) => {
     computer = computerName(os);
-    isWindows = os === "windows";
     if (os === "windows") fetchingCode = "Getting the code…";
   })
   .finally(() => void refresh());

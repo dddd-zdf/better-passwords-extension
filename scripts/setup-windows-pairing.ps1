@@ -1,6 +1,9 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param([switch]$Uninstall)
+param(
+    [switch]$Uninstall,
+    [switch]$LaunchChrome
+)
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
@@ -62,3 +65,7 @@ New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
 Register-PairingHost $bridgeHost "Better Passwords fork: Apple's password helper" $helper
 Register-PairingHost $pairingHost 'Better Passwords fork: Windows pairing code reader' $launcher
 Write-Host 'Windows pairing is set up for the Better Passwords fork in Chrome.'
+
+if ($LaunchChrome) {
+    Start-Process -FilePath 'chrome.exe'
+}

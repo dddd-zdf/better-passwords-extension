@@ -33,19 +33,14 @@ function portFor(reply: (message: { type: string }) => unknown) {
 }
 
 describe("WindowsPairing", () => {
-  it("probes with one-shot hello and runs arm/read-code on one port", async () => {
-    const oneShot: unknown[] = [];
+  it("runs arm/read-code on one port", async () => {
     const persistent = portFor((message) =>
       message.type === "read-code" ? { ok: true, code: "000000" } : { ok: true },
     );
-    const pairing = new WindowsPairing(
-      async (host, message) => {
-        oneShot.push({ host, message });
-        return { ok: true };
-      },
-      () => persistent.port,
-    );
-    expect(await pairing.state()).toBe("ready");
+    const pairing = new WindowsPairing((host) => {
+      expect(host).toBe(WINDOWS_PAIRING_HOST);
+      return persistent.port;
+    });
     let requested = false;
     let verified = "";
     await pairing.unlock(
@@ -57,7 +52,6 @@ describe("WindowsPairing", () => {
         verified = code;
       },
     );
-    expect(oneShot).toEqual([{ host: WINDOWS_PAIRING_HOST, message: { type: "hello" } }]);
     expect(persistent.messages).toEqual([{ type: "arm" }, { type: "read-code" }]);
     expect(requested).toBe(true);
     expect(verified).toBe("000000");
@@ -68,10 +62,7 @@ describe("WindowsPairing", () => {
     const persistent = portFor((message) =>
       message.type === "arm" ? { ok: false, error: "stable-code", message: "The code window is not ready." } : {},
     );
-    const pairing = new WindowsPairing(
-      async () => ({ ok: true }),
-      () => persistent.port,
-    );
+    const pairing = new WindowsPairing(() => persistent.port);
     let requests = 0;
     const first = pairing.unlock(
       async () => {

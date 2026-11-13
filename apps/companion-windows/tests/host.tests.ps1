@@ -38,7 +38,12 @@ try {
 
     Send-Frame $input ([Text.Encoding]::UTF8.GetBytes('{"type":"arm"}'))
     $arm = Read-Frame $output; Assert-Equal $arm.ok $false 'non-Chrome arm result'; Assert-Equal $arm.error 'browser-not-chrome' 'non-Chrome arm error'
+
+    Send-Frame $input ([Text.Encoding]::UTF8.GetBytes('{"type":"read-code"}'))
+    Assert-Equal (Read-Frame $output).error 'not-armed' 'read without an active attempt'
+    Assert-Equal ($process.WaitForExit(3000)) $true 'host exits after the read response with stdin still open'
     Write-Output 'host protocol tests passed'
 } finally {
-    $process.Kill(); $process.WaitForExit(); $process.Dispose()
+    if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    $process.Dispose()
 }

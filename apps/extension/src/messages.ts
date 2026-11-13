@@ -13,8 +13,6 @@ export type Request =
   | { type: "verify-code"; code: string }
   /** Shows a code on the Mac, then lets the companion app enter it after Touch ID. */
   | { type: "unlock-with-touch-id" }
-  /** On Windows, asks the local pairing reader to enter the fresh code. Popup only. */
-  | { type: "unlock-with-windows-pairing" }
   /** `tabId` is required from the popup; the inline menu is always bound to its own tab. */
   | { type: "list-logins"; tabId?: number }
   | { type: "fill"; tabId: number; username: string }
@@ -145,8 +143,6 @@ export interface Status extends SessionStatus {
   extensionUpdate?: string;
   /** True when the user wants Touch ID and the companion is ready for it. */
   touchId?: boolean;
-  /** True when the Windows pairing reader is installed and ready. */
-  windowsPairing?: boolean;
   /** This browser was just set up and hasn't been unlocked yet: say it worked, once. */
   justConnected?: boolean;
 }

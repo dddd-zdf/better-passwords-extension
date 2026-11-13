@@ -19,7 +19,7 @@ $script:State = [pscustomobject]@{
     Used = $false
     ChromePid = $null
     BrowserOrigin = $null
-    HelperPid = $null
+    HelperPids = @()
     BaselineWindows = @{}
 }
 $script:UiReady = $false
@@ -142,7 +142,7 @@ function Get-HelperProcesses {
 }
 
 function Get-DialogCandidates {
-    param([Parameter(Mandatory = $true)][uint32]$HelperPid, [hashtable]$ExcludeWindows = @{}, [switch]$Baseline)
+    param([Parameter(Mandatory = $true)][uint32[]]$HelperPids, [hashtable]$ExcludeWindows = @{}, [switch]$Baseline)
     $desktop = [System.Windows.Automation.AutomationElement]::RootElement
     $any = [System.Windows.Automation.Condition]::TrueCondition
     $dialogClass = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, '#32770')
@@ -157,9 +157,10 @@ function Get-DialogCandidates {
                 $window = $dialog.Current
                 $windowPid = [uint32]$window.ProcessId
                 $windowHandle = [uint32]$window.NativeWindowHandle
-                if ($window.IsOffscreen -or $windowHandle -eq 0 -or $windowPid -ne $HelperPid -or $ExcludeWindows.ContainsKey($windowHandle)) { continue }
+                $windowKey = "${windowPid}:$windowHandle"
+                if ($window.IsOffscreen -or $windowHandle -eq 0 -or $windowPid -notin $HelperPids -or $ExcludeWindows.ContainsKey($windowKey)) { continue }
                 if ($Baseline) {
-                    $candidates += [pscustomobject]@{ Hwnd = $windowHandle }
+                    $candidates += $windowKey
                     continue
                 }
                 $hasPrompt = $false
@@ -198,18 +199,18 @@ function Invoke-Arm {
     if ([string]::IsNullOrWhiteSpace($browser.Origin)) { return [pscustomobject]@{ ok = $false; error = 'browser-origin-missing'; message = 'Chrome did not identify the Better Passwords extension.' } }
     if (-not (Ensure-UiAutomation)) { return [pscustomobject]@{ ok = $false; error = 'ui-unavailable'; message = 'Windows accessibility is unavailable for the iCloud dialog.' } }
     $helpers = @(Get-HelperProcesses -Snapshot $browser.Snapshot -ChromePid $browser.Pid -Origin $browser.Origin)
-    if ($helpers.Count -ne 1) {
-        return [pscustomobject]@{ ok = $false; error = 'helper-not-unique'; message = 'Could not identify one iCloud helper for this extension. Enter the code manually.' }
+    if ($helpers.Count -eq 0) {
+        return [pscustomobject]@{ ok = $false; error = 'helper-not-found'; message = 'Could not find the iCloud helper for this extension. Enter the code manually.' }
     }
-    $helperPid = [uint32]$helpers[0].ProcessId
+    $helperPids = @($helpers | ForEach-Object { [uint32]$_.ProcessId })
     $baseline = @{}
-    foreach ($candidate in @(Get-DialogCandidates -HelperPid $helperPid -Baseline)) {
-        $baseline[[uint32]$candidate.Hwnd] = $true
+    foreach ($windowKey in @(Get-DialogCandidates -HelperPids $helperPids -Baseline)) {
+        $baseline[$windowKey] = $true
     }
     $script:State.Armed = $true
     $script:State.ChromePid = $browser.Pid
     $script:State.BrowserOrigin = $browser.Origin
-    $script:State.HelperPid = $helperPid
+    $script:State.HelperPids = $helperPids
     $script:State.BaselineWindows = $baseline
     return [pscustomobject]@{ ok = $true }
 }
@@ -225,10 +226,11 @@ function Invoke-ReadCode {
                 return [pscustomobject]@{ ok = $false; error = 'browser-not-chrome'; message = 'The original Chrome browser is no longer connected.' }
             }
             $helpers = @(Get-HelperProcesses -Snapshot $browser.Snapshot -ChromePid $browser.Pid -Origin $browser.Origin)
-            if ($helpers.Count -ne 1 -or [uint32]$helpers[0].ProcessId -ne $script:State.HelperPid) {
-                return [pscustomobject]@{ ok = $false; error = 'helper-changed'; message = 'The iCloud helper changed during pairing. Try again or enter the code manually.' }
+            $helperPids = @($helpers | ForEach-Object { [uint32]$_.ProcessId } | Where-Object { $_ -in $script:State.HelperPids })
+            if ($helperPids.Count -eq 0) {
+                return [pscustomobject]@{ ok = $false; error = 'helper-changed'; message = 'The iCloud helper changed during pairing. Enter the code manually.' }
             }
-            $candidates = @(Get-DialogCandidates -HelperPid $script:State.HelperPid -ExcludeWindows $script:State.BaselineWindows)
+            $candidates = @(Get-DialogCandidates -HelperPids $helperPids -ExcludeWindows $script:State.BaselineWindows)
             if ($candidates.Count -eq 1) { return [pscustomobject]@{ ok = $true; code = [string]$candidates[0].Code } }
             if ($candidates.Count -gt 1) { return [pscustomobject]@{ ok = $false; error = 'ambiguous-code'; message = 'More than one new iCloud verification dialog is open.' } }
             Start-Sleep -Milliseconds 50
@@ -238,7 +240,7 @@ function Invoke-ReadCode {
         $script:State.BaselineWindows = @{}
         $script:State.ChromePid = $null
         $script:State.BrowserOrigin = $null
-        $script:State.HelperPid = $null
+        $script:State.HelperPids = @()
     }
 }
 function Invoke-Request {
@@ -261,6 +263,8 @@ try {
         } catch {
             Send-Failure -Error 'internal-error' -Message 'The Windows pairing host could not complete the request.'
         }
+        # Each port can serve one pairing attempt. Chrome starts a new host next time.
+        if ($request.PSObject.Properties['type'] -and $request.type -ceq 'read-code') { break }
     }
 } finally {
     $inputStream.Dispose()

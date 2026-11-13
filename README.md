@@ -68,7 +68,7 @@ The setup connects Chrome, Brave, Edge, Vivaldi, Arc, Dia, Helium, Crest, Ardia,
 
 #### Chrome with automatic pairing
 
-The Windows pairing build can read the six-digit code from Apple's dialog and submit it through Chrome's native messaging. Click **Enter it for me** in the extension popup. This build uses the click as confirmation and does not ask for Windows Hello. You can also enter the code manually.
+The Windows pairing build reads the six-digit code from Apple's dialog and submits it through Chrome's native messaging when the extension needs to verify. Pairing happens in the background without a Windows Hello prompt. You can also enter the code manually if automatic pairing fails.
 
 1. Install iCloud for Windows, sign in and turn on Passwords.
 2. Build this fork from its root with [Bun](https://bun.sh/).
@@ -80,11 +80,11 @@ The Windows pairing build can read the six-digit code from Apple's dialog and su
    Remove-Item Env:WXT_WINDOWS_PAIRING_FORK
    ```
 
-3. Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-pairing.ps1`. Keep this checkout in place so Chrome can find the companion.
+3. Double-click **Open Chrome with Better Passwords.cmd**. It registers the companion for your Windows account and opens Chrome. Keep the launcher, `scripts`, and `apps/companion-windows` together so Chrome can find the companion.
 4. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select `apps/extension/.output/chrome-mv3-windows-pairing`.
-5. Open **Better Passwords - Windows pairing** and click **Enter it for me** when prompted for the code. If the companion cannot read the dialog, use the code shown by Apple. Automatic reading currently expects Apple's English dialog.
+5. **Better Passwords - Windows pairing** verifies automatically after you load it. If the companion cannot read the dialog, open the extension popup to enter the code manually. Automatic reading currently expects Apple's English dialog.
 
-To remove the fork, remove it from Chrome and rerun the setup command with `-Uninstall`. The fork has its own Chrome extension ID and native host registrations, so it can coexist with the store version.
+Once the companion is registered, opening Chrome from your usual shortcut also works. Chrome starts the companion when needed, and the companion exits after returning the pairing result. To remove the fork, remove it from Chrome and run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows-pairing.ps1 -Uninstall`. The fork has its own Chrome extension ID and native host registrations, so it can coexist with the store version.
 
 #### Manual pairing with the standard build
 
